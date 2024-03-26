@@ -6,6 +6,7 @@
  */
 
 import { encrypt } from './encryption.js';
+import { fragmentAndSendMessage } from './fragmenter.js';
 
 export async function sendUpdate(client, message, passphrase) {
     if (!client) {
@@ -14,5 +15,5 @@ export async function sendUpdate(client, message, passphrase) {
     }
 
     const encryptedMessage = encrypt('NETPASTE_UPDATE:' + message, passphrase);
-    client.write(encryptedMessage);
+    fragmentAndSendMessage(encryptedMessage, client);
 }

@@ -25,7 +25,7 @@ function getPassphrase(callback) {
         terminal: true
     });
 
-    process.stdout.write('Passphrase: ');
+    process.stdout.write('Passphrase for session: ');
     mutableStdout.muted = true; // Mute the output to prevent displaying the password
 
     process.stdin.on('keypress', (char, key) => {

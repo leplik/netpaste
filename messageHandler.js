@@ -11,20 +11,21 @@ import clipboardy from 'clipboardy';
 
 function logReceived(content) {
     const currentTime = new Date().toLocaleTimeString();
-    process.stdout.write(`${chalk.gray(`[${currentTime}]`)} ${chalk.blue('Received content: ')}${chalk.green(content.length.toString())} characters...\n`);
+    process.stdout.write(`${chalk.gray(`[${currentTime}]`)} ${chalk.blue('Received content: ')}${chalk.green(content.length.toString())} characters.\n`);
 }
 
-export function handleMessage(data, passphrase) {
+export function handleMessage(data, passphrase, disableClipboard = false) {
         try {
         const decryptedMessage = decrypt(data.toString(), passphrase);
-
         if (decryptedMessage.startsWith('NETPASTE_HELLO:')) {
             const clientMessage = decryptedMessage.replace('NETPASTE_HELLO:', '').trim();
             console.log(`Peer message: ${clientMessage}`);
         } else if (decryptedMessage.startsWith('NETPASTE_UPDATE:')) {
             const updateMessage = decryptedMessage.replace('NETPASTE_UPDATE:', '').trim();            
             logReceived(updateMessage)
-            clipboardy.writeSync(updateMessage);            
+            if (!disableClipboard) {
+                clipboardy.writeSync(updateMessage);            
+            }
         } else {
             console.log('Decrypted:', decryptedMessage);
         }
