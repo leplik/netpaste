@@ -1,4 +1,9 @@
-// Path: client.js
+/**
+ * @fileoverview Entry point for the client-side of the Netpaste application.
+ * 
+ * @name client.js
+ * @author Aliaksei Smirnou
+ */
 
 import net from 'net';
 import { encrypt } from './encryption.js';

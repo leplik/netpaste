@@ -1,3 +1,10 @@
+/**
+ * @fileoverview This module provides encryption and decryption functions for the Netpaste application.
+ * 
+ * @name encryption.js
+ * @author Aliaksei Smirnou
+ */
+
 import crypto from 'crypto';
 
 // Cryptographic configuration

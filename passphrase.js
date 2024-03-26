@@ -1,4 +1,9 @@
-// passphraseHandler.js
+/**
+ * @fileoverview Captures user input for the passphrase in a secure manner.
+ * 
+ * @name passphrase.js
+ * @author Aliaksei Smirnou
+ */
 
 import readline from 'readline';
 import { Writable } from 'stream';

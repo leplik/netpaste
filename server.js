@@ -1,4 +1,9 @@
-// Path: server.js
+/**
+ * @fileoverview Server entry point
+ * 
+ * @name server.js
+ * @author Aliaksei Smirnou
+ */
 
 import net from 'net';
 import { getPassphrase } from './passphrase.js';

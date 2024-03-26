@@ -1,4 +1,9 @@
-// sendUpdate.js
+/**
+ * @fileoverview Sends an update to the server.
+ * 
+ * @name sendUpdate.js
+ * @author Aliaksei Smirnou
+ */
 
 import { encrypt } from './encryption.js';
 

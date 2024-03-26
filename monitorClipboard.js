@@ -1,3 +1,10 @@
+/**
+ * @fileoverview Monitors the clipboard for changes and sends updates to the server.
+ * 
+ * @name monitorClipboard.js
+ * @author Aliaksei Smirnou
+ */
+
 import chalk from 'chalk';
 import clipboardy from 'clipboardy';
 
