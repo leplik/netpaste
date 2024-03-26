@@ -12,7 +12,7 @@ async function readClipboard() {
     try {
         return await clipboardy.read();
     } catch (error) {
-        console.error(chalk.red(`Failed to read clipboard: ${error.message}`));
+        console.error(`Failed to read clipboard: ${error.message}`);
         return null;
     }
 }
@@ -39,7 +39,7 @@ export async function monitorClipboard(sendUpdate, passphrase) {
                 await sendUpdate(content, passphrase);
                 logResult(true);
             } catch (error) {
-                console.error(chalk.red(`Error sending update: ${error.message}`));
+                console.error(`Error sending update: ${error.message}`);
                 logResult(false);
             }
         }
