@@ -1,7 +1,13 @@
-// messageHandler.js
+/**
+ * @fileoverview Decrypts and handles messages received from the server.
+ * 
+ * @name messageHandler.js
+ * @author Aliaksei Smirnou
+ */
 
 import { decrypt } from './encryption.js';
 import chalk from 'chalk';
+import clipboardy from 'clipboardy';
 
 export function handleMessage(data, passphrase) {
     try {
@@ -13,6 +19,7 @@ export function handleMessage(data, passphrase) {
         } else if (decryptedMessage.startsWith('NETPASTE_UPDATE:')) {
             const updateMessage = decryptedMessage.replace('NETPASTE_UPDATE:', '').trim();
             console.log(`Clipboard update received: ${updateMessage}`);
+            clipboardy.writeSync(updateMessage);            
         } else {
             console.log('Decrypted:', decryptedMessage);
         }
