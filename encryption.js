@@ -30,8 +30,14 @@ function encrypt(text, passphrase) {
 
 function decrypt(data, passphrase) {
     const [saltHex, ivHex, encryptedHex] = data.split(':');
+
+    // verify length of salt and iv, if not x2 from config throw error
+    if (saltHex.length !== config.saltLength * 2 || ivHex.length !== config.ivLength * 2) {
+        throw new Error('Integrity check failed. Data corrupted.');
+    }
+
     const salt = Buffer.from(saltHex, 'hex');
-    const iv = Buffer.from(ivHex, 'hex');
+    const iv = Buffer.from(ivHex, 'hex');    
     const key = crypto.pbkdf2Sync(passphrase, salt, config.iterations, config.keyLength, config.hashFunction);
     const decipher = crypto.createDecipheriv(config.algorithm, key, iv);
     const decrypted = Buffer.concat([decipher.update(Buffer.from(encryptedHex, 'hex')), decipher.final()]);
