@@ -8,6 +8,7 @@
 import { decrypt } from './encryption.js';
 import chalk from 'chalk';
 import clipboardy from 'clipboardy';
+import { setClipboardUpdateSource } from './monitorClipboard.js';
 
 function logReceived(content) {
     const currentTime = new Date().toLocaleTimeString();
@@ -24,7 +25,12 @@ export function handleMessage(data, passphrase, disableClipboard = false) {
             const updateMessage = decryptedMessage.replace('NETPASTE_UPDATE:', '').trim();            
             logReceived(updateMessage)
             if (!disableClipboard) {
-                clipboardy.writeSync(updateMessage);            
+                setClipboardUpdateSource(true);
+                clipboardy.writeSync(updateMessage);
+                
+                setTimeout(() => {
+                    setClipboardUpdateSource(false);
+                }, 2000);
             }
         } else {
             console.log('Decrypted:', decryptedMessage);

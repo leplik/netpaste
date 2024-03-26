@@ -8,6 +8,8 @@
 import chalk from 'chalk';
 import clipboardy from 'clipboardy';
 
+let isUpdatingFromNetwork = false;
+
 async function readClipboard() {
     try {
         return await clipboardy.read();
@@ -32,6 +34,11 @@ export async function monitorClipboard(sendUpdate, passphrase) {
     setInterval(async () => {
         const content = await readClipboard();
 
+        if (isUpdatingFromNetwork) {
+            lastClipboardContent = content
+            return;
+        }
+
         if (content && content !== lastClipboardContent) {
             logSending(content);
             lastClipboardContent = content;
@@ -44,4 +51,8 @@ export async function monitorClipboard(sendUpdate, passphrase) {
             }
         }
     }, 1000);
+}
+
+export function setClipboardUpdateSource(isFromNetwork) {
+    isUpdatingFromNetwork = isFromNetwork;
 }
