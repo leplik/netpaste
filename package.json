@@ -1,17 +1,45 @@
 {
   "name": "netpaste",
+  "version": "2.0.0",
+  "description": "Encrypted clipboard sync between your machines on a local network",
   "type": "module",
-  "version": "1.0.0",
-  "description": "",
-  "main": "server.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "bin": {
+    "netpaste": "./bin/netpaste.js"
   },
-  "keywords": [],
+  "files": [
+    "bin",
+    "src",
+    "contrib",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node bin/netpaste.js",
+    "typecheck": "tsc",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "check": "npm run typecheck && npm test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leplik/netpaste.git"
+  },
+  "keywords": [
+    "clipboard",
+    "sync",
+    "lan",
+    "cli",
+    "encryption"
+  ],
   "author": "Aliaksei Smirnou",
   "license": "MIT",
   "dependencies": {
-    "chalk": "^5.3.0",
-    "clipboardy": "^4.0.0"
+    "bonjour-service": "^1.4.4",
+    "clipboardy": "^5.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
   }
 }

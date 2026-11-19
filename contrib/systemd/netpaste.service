@@ -1,0 +1,18 @@
+# netpaste as a systemd user service (Linux).
+# Install: see "Start automatically" in README.md (sed replaces __NODE__ and __NETPASTE__).
+# Hub: replace "connect" with "serve". Fixed address: add HOST after "connect".
+# Headless relay hub: "serve --no-clipboard" and WantedBy=default.target.
+
+[Unit]
+Description=netpaste clipboard sync
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=__NODE__ __NETPASTE__ connect --passphrase-file %h/.config/netpaste/passphrase
+Environment=NO_COLOR=1
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target
