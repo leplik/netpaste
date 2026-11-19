@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  netpaste as a macOS LaunchAgent: it starts at login and restarts after a crash.
+  Install: see "Start automatically" in README.md (sed replaces __NODE__, __NETPASTE__, __HOME__).
+  Hub: replace "connect" with "serve". Fixed address: add <string>HOST</string> after "connect".
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.leplik.netpaste</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__NETPASTE__</string>
+    <string>connect</string>
+    <string>--passphrase-file</string>
+    <string>__HOME__/.config/netpaste/passphrase</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NO_COLOR</key>
+    <string>1</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/netpaste.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/netpaste.log</string>
+</dict>
+</plist>
