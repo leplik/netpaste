@@ -7,9 +7,11 @@ import { Client, FatalError } from '../src/client.ts';
 import { ClipboardWatcher } from '../src/clipboard.ts';
 import { FrameType, encodeFrame } from '../src/frame.ts';
 import { FrameReader } from '../src/frame-reader.ts';
-import { HANDSHAKE_MAX_BODY_BYTES, serverHandshake } from '../src/handshake.ts';
+import { MAX_CONCURRENT_KDF, MAX_PENDING_PER_ADDRESS } from '../src/config.ts';
+import { HANDSHAKE_MAX_BODY_BYTES, HandshakeErrorCode, clientHandshake, serverHandshake } from '../src/handshake.ts';
 import { Hub } from '../src/server.ts';
-import { FAST_KDF, FAST_TIMINGS, MemoryClipboard, type RecordingLogger, recordingLogger, waitFor } from './helpers.ts';
+import { Session } from '../src/session.ts';
+import { FAST_KDF, FAST_TIMINGS, MemoryClipboard, type RecordingLogger, recordingLogger, socketPair, waitFor } from './helpers.ts';
 
 const PASSPHRASE = 'correct horse battery staple';
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -32,11 +34,11 @@ function machine(initial: string): Machine {
   return { backend, watcher, log };
 }
 
-async function startHub(options: { clipboard?: Machine; port?: number; maxTextBytes?: number } = {}) {
+async function startHub(options: { clipboard?: Machine; port?: number; maxTextBytes?: number; host?: string } = {}) {
   const log = options.clipboard?.log ?? recordingLogger();
   const hub = new Hub({
     port: options.port ?? 0,
-    host: '127.0.0.1',
+    host: options.host ?? '127.0.0.1',
     passphrase: PASSPHRASE,
     clipboard: options.clipboard?.watcher ?? null,
     maxTextBytes: options.maxTextBytes ?? 10 * 1024 * 1024,
@@ -51,10 +53,19 @@ async function startHub(options: { clipboard?: Machine; port?: number; maxTextBy
   return { hub, port, log };
 }
 
-async function startClient(port: number, name: string, m: Machine | null, options: { passphrase?: string; maxTextBytes?: number } = {}) {
+interface ClientTestOptions {
+  passphrase?: string;
+  maxTextBytes?: number;
+  host?: string;
+  /** Simulates mDNS discovery: the client gets the address from this function. */
+  findServer?: (signal: AbortSignal) => Promise<{ host: string; port: number }>;
+}
+
+async function startClient(port: number, name: string, m: Machine | null, options: ClientTestOptions = {}) {
   const log = m?.log ?? recordingLogger();
   const client = new Client({
-    target: { host: '127.0.0.1', port },
+    target: options.findServer ? null : { host: options.host ?? '127.0.0.1', port },
+    findServer: options.findServer,
     passphrase: options.passphrase ?? PASSPHRASE,
     clipboard: m?.watcher ?? null,
     maxTextBytes: options.maxTextBytes ?? 10 * 1024 * 1024,
@@ -73,6 +84,56 @@ async function startClient(port: number, name: string, m: Machine | null, option
 }
 
 const connectedPeers = (hub: Hub) => hub.peers.filter((session) => session.peer !== null).length;
+
+/** A TCP server for fake hubs; `onConnection` gets every accepted socket. */
+async function fakeServer(onConnection: (socket: net.Socket) => void): Promise<number> {
+  const server = net.createServer((socket) => {
+    socket.on('error', () => undefined);
+    onConnection(socket);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const sockets = new Set<net.Socket>();
+  server.on('connection', (socket) => sockets.add(socket));
+  cleanups.push(() => {
+    for (const socket of sockets) socket.destroy();
+    return new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return (server.address() as net.AddressInfo).port;
+}
+
+/** A proxy that forwards client→hub at full speed and hub→client at `bytesPerSecond`. */
+async function throttledProxy(hubPort: number, bytesPerSecond: number): Promise<number> {
+  return fakeServer((client) => {
+    const upstream = net.connect(hubPort, '127.0.0.1');
+    upstream.on('error', () => undefined);
+    client.pipe(upstream);
+    const queue: Buffer[] = [];
+    upstream.on('data', (data: Buffer) => queue.push(data));
+    const timer = setInterval(() => {
+      let budget = bytesPerSecond / 20;
+      while (budget > 0 && queue.length > 0) {
+        const head = queue[0]!;
+        const part = head.subarray(0, budget);
+        client.write(part);
+        budget -= part.length;
+        if (part.length === head.length) queue.shift();
+        else queue[0] = head.subarray(part.length);
+      }
+    }, 50);
+    const end = () => {
+      clearInterval(timer);
+      client.destroy();
+      upstream.destroy();
+    };
+    client.on('close', end);
+    upstream.on('close', end);
+  });
+}
+
+const hasIPv6Loopback = await new Promise<boolean>((resolve) => {
+  const probe = net.createServer().once('error', () => resolve(false));
+  probe.listen(0, '::1', () => probe.close(() => resolve(true)));
+});
 
 describe('hub with clients', () => {
   it('syncs text between all machines without echo and without changing it', async () => {
@@ -239,5 +300,114 @@ describe('security and robustness', () => {
     await sleep(1500); // well above idleTimeoutMs: heartbeats keep it open
     assert.equal(healthy.client.session, session);
     assert.equal(session?.closed, false);
+  });
+});
+
+describe('connections without the passphrase', () => {
+  it('are limited per address, so other machines still get in', { skip: !hasIPv6Loopback }, async () => {
+    const { hub, port } = await startHub({ host: '::' });
+    let closed = 0;
+    for (let i = 0; i < 8; i++) {
+      const socket = net.connect(port, '127.0.0.1');
+      socket.on('error', () => undefined);
+      socket.on('close', () => closed++);
+      cleanups.push(() => void socket.destroy());
+    }
+    await waitFor(() => closed === 8 - MAX_PENDING_PER_ADDRESS, 'the hub refuses the extra connections');
+    await startClient(port, 'other machine', null, { host: '::1' });
+    await waitFor(() => connectedPeers(hub) === 1, 'a client from another address');
+  });
+
+  it('cannot test many passphrases in parallel from one address', async () => {
+    const { hub, port } = await startHub();
+    let checked = 0;
+    hub.on('auth-failed', () => checked++);
+    const attempts = Array.from({ length: MAX_PENDING_PER_ADDRESS }, async () => {
+      const socket = net.connect(port, '127.0.0.1');
+      socket.on('error', () => undefined);
+      cleanups.push(() => void socket.destroy());
+      await once(socket, 'connect');
+      return clientHandshake(socket, new FrameReader(socket, HANDSHAKE_MAX_BODY_BYTES), { passphrase: 'a wrong guess', kdf: FAST_KDF });
+    });
+    const results = await Promise.allSettled(attempts);
+    assert.ok(results.every((result) => result.status === 'rejected'));
+    await sleep(100);
+    assert.ok(checked >= 1 && checked <= MAX_CONCURRENT_KDF, `${checked} guesses were checked`);
+  });
+});
+
+describe('client lifecycle', () => {
+  it('stops when it is closed during discovery', async () => {
+    const { hub, port } = await startHub();
+    const { client, running } = await startClient(port, 'a', null, {
+      // Ignores the signal on purpose: the client must still stop after it returns.
+      findServer: async () => {
+        await sleep(300);
+        return { host: '127.0.0.1', port };
+      },
+    });
+    await sleep(100);
+    await client.close();
+    const state = await Promise.race([running.then(() => 'stopped'), sleep(1000).then(() => 'still running')]);
+    assert.equal(state, 'stopped');
+    await sleep(200);
+    assert.equal(hub.peers.length, 0);
+  });
+
+  it('keeps trying after a forged "wrong passphrase" that came before its own proof', async () => {
+    const port = await fakeServer((socket) => socket.end(encodeFrame(FrameType.Error, Buffer.of(HandshakeErrorCode.AuthFailed))));
+    const { running, log } = await startClient(port, 'a', null);
+    const state = await Promise.race([running.then(() => 'stopped', () => 'stopped'), sleep(500).then(() => 'running')]);
+    assert.equal(state, 'running');
+    assert.ok(log.has('warn', /before the passphrase check/));
+  });
+
+  it('does not stop when a server found by mDNS rejects the passphrase (it may be an impostor)', async () => {
+    const { port } = await startHub();
+    const { running, log } = await startClient(port, 'a', null, {
+      passphrase: 'wrong passphrase',
+      findServer: async () => ({ host: '127.0.0.1', port }),
+    });
+    await waitFor(() => log.has('error', /wrong passphrase/), 'an error message');
+    const state = await Promise.race([running.then(() => 'stopped', () => 'stopped'), sleep(300).then(() => 'running')]);
+    assert.equal(state, 'running');
+  });
+});
+
+describe('session', () => {
+  it('does not cut a large text on a slow link with the idle timeout', { timeout: 20_000 }, async () => {
+    const a = machine('a');
+    const b = machine('b');
+    const { hub, port } = await startHub();
+    await startClient(port, 'a', a);
+    const slowPort = await throttledProxy(port, 100 * 1024);
+    await startClient(slowPort, 'b', b);
+    await waitFor(() => connectedPeers(hub) === 2, 'two clients');
+    const text = 'x'.repeat(300 * 1024); // 3 s at 100 KB/s; the idle timeout is 0.6 s
+    a.backend.text = text;
+    await waitFor(() => b.backend.text === text, 'the text over the slow link', 15_000);
+  });
+
+  it('does not send text to a peer that has not introduced itself yet', async () => {
+    const pair = await socketPair();
+    cleanups.push(() => {
+      pair.client.destroy();
+      pair.server.destroy();
+    });
+    const serverReader = new FrameReader(pair.server, HANDSHAKE_MAX_BODY_BYTES);
+    const [, serverChannel] = await Promise.all([
+      clientHandshake(pair.client, new FrameReader(pair.client, HANDSHAKE_MAX_BODY_BYTES), { passphrase: PASSPHRASE, kdf: FAST_KDF }),
+      serverHandshake(pair.server, serverReader, { passphrase: PASSPHRASE, kdf: FAST_KDF }),
+    ]);
+    const session = new Session(pair.server, serverReader, serverChannel, {
+      maxTextBytes: 1024 * 1024,
+      heartbeatIntervalMs: 1000,
+      idleTimeoutMs: 5000,
+      localName: 'hub',
+      version: 'test',
+    });
+    session.start();
+    assert.equal(session.sendClip('text'), 'not-ready');
+    session.close();
   });
 });

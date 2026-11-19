@@ -80,7 +80,9 @@ export function advertise(port: number, name: string, log: Logger, transport?: M
   };
 }
 
-export async function discoverServers(timeoutMs: number, transport?: MdnsTransport): Promise<FoundServer[]> {
+/** Searches for `timeoutMs`. Rejects with the signal's reason when the signal aborts first. */
+export async function discoverServers(timeoutMs: number, transport?: MdnsTransport, signal?: AbortSignal): Promise<FoundServer[]> {
+  signal?.throwIfAborted();
   let failure: Error | null = null;
   const bonjour = createBonjour(transport, (error: Error) => {
     failure ??= error;
@@ -94,9 +96,12 @@ export async function discoverServers(timeoutMs: number, transport?: MdnsTranspo
     const name = sanitizeForTerminal(service.name) || 'unnamed';
     found.set(`${name}|${host}|${service.port}`, { name, host, port: service.port });
   });
-  await sleep(timeoutMs);
-  browser.stop();
-  await Promise.race([new Promise<void>((resolve) => bonjour.destroy(() => resolve())), sleep(1000)]);
+  try {
+    await sleep(timeoutMs, undefined, signal ? { signal } : {});
+  } finally {
+    browser.stop();
+    await Promise.race([new Promise<void>((resolve) => bonjour.destroy(() => resolve())), sleep(1000)]);
+  }
   if (failure && found.size === 0) throw new Error(`mDNS search failed: ${(failure as Error).message}`);
   return [...found.values()].sort((a, b) => a.name.localeCompare(b.name) || a.host.localeCompare(b.host));
 }

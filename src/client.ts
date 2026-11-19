@@ -14,7 +14,8 @@ import type { KdfParams } from './crypto.ts';
 import { FrameReader } from './frame-reader.ts';
 import { HANDSHAKE_MAX_BODY_BYTES, HandshakeError, clientHandshake } from './handshake.ts';
 import { type Logger, formatCount } from './log.ts';
-import { Session, formatAddress } from './session.ts';
+import { formatAddress } from './address.ts';
+import { Session } from './session.ts';
 
 export interface Target {
   host: string;
@@ -24,7 +25,8 @@ export interface Target {
 export interface ClientOptions {
   /** Server address; null = call `findServer` before every connection attempt. */
   target: Target | null;
-  findServer?: (() => Promise<Target>) | undefined;
+  /** Finds the server (mDNS). It should stop early when the signal aborts. */
+  findServer?: ((signal: AbortSignal) => Promise<Target>) | undefined;
   passphrase: string;
   /** null = do not use the local clipboard (only log what arrives). */
   clipboard: ClipboardWatcher | null;
@@ -65,22 +67,29 @@ export class Client extends EventEmitter<ClientEvents> {
     return this.#session;
   }
 
-  /** Connects and reconnects until `close()`. Rejects with `FatalError` when retrying cannot help. */
+  /**
+   * Connects and reconnects until `close()`. Rejects with `FatalError` when retrying cannot help.
+   * Only an explicitly given server can make an error fatal: a server found with mDNS may be an
+   * impostor, and handshake ERROR frames are not authenticated.
+   */
   async run(): Promise<void> {
     const { signal } = this.#stop;
     const { log } = this.#options;
+    const discovered = this.#options.target === null;
     let attempt = 0;
     while (!signal.aborted) {
       let where = 'server';
       try {
-        const target = this.#options.target ?? (await this.#options.findServer!());
+        const target = this.#options.target ?? (await this.#options.findServer!(signal));
+        signal.throwIfAborted();
         where = formatAddress(target.host, target.port);
         if (await this.#connectOnce(target)) attempt = 0;
       } catch (error) {
         if (signal.aborted) break;
         const fatal = toFatal(error);
-        if (fatal) throw fatal;
-        logRetry(log, where, error);
+        if (fatal && !discovered) throw fatal;
+        if (fatal) log.error(`${where}: ${fatal.message}`);
+        else logRetry(log, where, error);
       }
       if (signal.aborted) break;
       const wait = backoffDelay(attempt++, this.#timings.reconnectMinMs, this.#timings.reconnectMaxMs);
@@ -160,6 +169,7 @@ export class Client extends EventEmitter<ClientEvents> {
     const result = session.sendClip(text);
     if (result === 'sent') log.info(`→ ${formatCount(text.length)} chars sent to ${session.label}`);
     else if (result === 'too-large') log.warn(`not sent: ${formatCount(Buffer.byteLength(text))} bytes is above the size limit`);
+    else if (result === 'too-slow') log.warn('not sent: the server has not received the earlier data yet');
     else log.info('not connected: local copy was not sent');
   }
 }
@@ -189,6 +199,11 @@ function logRetry(log: Logger, where: string, error: unknown): void {
 
 function connectTcp(target: Target, timeoutMs: number, signal: AbortSignal): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
+    // addEventListener('abort') does not fire for a signal that is already aborted.
+    if (signal.aborted) {
+      reject(new Error('stopped'));
+      return;
+    }
     const socket = net.connect({ host: target.host, port: target.port });
     const cleanup = () => {
       clearTimeout(timer);

@@ -111,9 +111,11 @@ export class ClipboardWatcher extends EventEmitter<ClipboardWatcherEvents> {
       await write;
     } catch (error) {
       this.#options.log.error(`cannot write to the clipboard: ${errorMessage(error)}`);
-      // Resynchronize with what is really in the clipboard, so the old text is not sent out as "new".
-      const actual = await this.#read();
-      if (actual !== null) this.#last = actual;
+      // The clipboard content is unknown now. The next successful poll takes it as the baseline
+      // and does not send it, so old text never goes out as a "new" copy. A copy that the user
+      // makes during this short window is not sent either: that is the safer of the two failures.
+      // (A re-read here could overlap the next queued write and cause an echo.)
+      this.#baselinePending = true;
     } finally {
       this.#pendingWrites--;
       this.#generation++;

@@ -125,6 +125,32 @@ describe('ClipboardWatcher', () => {
     assert.deepEqual(changes, []);
   });
 
+  it('after a failed write, the next queued write is not echoed back', async () => {
+    const { backend, watcher, changes } = setup('old');
+    await watcher.start();
+    backend.failNextWrite = true;
+    await Promise.all([watcher.apply('first (fails)'), watcher.apply('second')]);
+    await watcher.poll();
+    await watcher.poll();
+    watcher.stop();
+    assert.equal(backend.text, 'second');
+    assert.deepEqual(changes, []);
+  });
+
+  it('when the first read and a write both fail, old text is never sent', async () => {
+    const { backend, watcher, changes } = setup('old private text');
+    backend.failReads = true; // display not ready at login
+    await watcher.start();
+    backend.failNextWrite = true;
+    await watcher.apply('from the network');
+    backend.failReads = false;
+    await watcher.poll();
+    backend.text = 'a real copy';
+    await watcher.poll();
+    watcher.stop();
+    assert.deepEqual(changes, ['a real copy']);
+  });
+
   it('serializes writes in arrival order', async () => {
     const { backend, watcher } = setup();
     await watcher.start();

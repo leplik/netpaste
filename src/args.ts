@@ -1,3 +1,4 @@
+import net from 'node:net';
 import { parseArgs } from 'node:util';
 import {
   DEFAULT_MAX_TEXT_BYTES,
@@ -134,18 +135,22 @@ export function parseTarget(value: string, flagPort?: number): { host: string; p
   const bracketed = /^\[([^\]]+)\](?::(.*))?$/.exec(value);
   if (bracketed) {
     host = bracketed[1]!;
+    if (!net.isIPv6(host)) throw new UsageError(`only an IPv6 address can be in brackets: "${value}"`);
     if (bracketed[2] !== undefined) port = parsePort(bracketed[2]);
   } else if (value.split(':').length === 2) {
     const [h, p] = value.split(':') as [string, string];
     host = h;
     port = parsePort(p);
   }
-  if (host.length === 0) throw new UsageError(`invalid host "${value}"`);
+  if (!net.isIP(host) && !HOST_NAME.test(host)) throw new UsageError(`invalid host "${value}" (examples: studio.local, 192.168.1.10, [fe80::1]:8134)`);
   if (port !== undefined && flagPort !== undefined && port !== flagPort) {
     throw new UsageError(`port ${port} in "${value}" conflicts with --port ${flagPort}`);
   }
   return { host, port: port ?? flagPort ?? DEFAULT_PORT };
 }
+
+/** DNS host name: labels of letters, digits, "-" (and "_", which some LAN names use), dot-separated. */
+const HOST_NAME = /^(?=.{1,253}\.?$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*\.?$/i;
 
 export function parsePort(value: string): number {
   if (!/^\d+$/.test(value)) throw new UsageError(`invalid port "${value}"`);

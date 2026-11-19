@@ -50,6 +50,16 @@ describe('HiddenLineEditor', () => {
     assert.equal(typed('a🙂\u007f\r').value, 'a');
   });
 
+  it('does not swallow Enter or Ctrl+C after a stray ESC', () => {
+    assert.equal(typed('abc\u001b\r').done, true);
+    assert.equal(typed('abc\u001b\r').value, 'abc');
+    assert.equal(typed('abc\u001b\u0003').cancelled, true);
+  });
+
+  it('keeps TAB, like a passphrase file or the environment do', () => {
+    assert.equal(typed('a\tb\r').value, 'a\tb');
+  });
+
   it('cancels with Ctrl+C, and with Ctrl+D on an empty line', () => {
     assert.equal(typed('abc\u0003').cancelled, true);
     assert.equal(typed('\u0004').cancelled, true);
@@ -106,9 +116,10 @@ describe('resolvePassphrase', () => {
   it('prefers --passphrase-file and strips one final newline', async () => {
     const file = path.join(dir, 'pass');
     await writeFile(file, 'from file with spaces  \n\n', { mode: 0o600 });
-    const env = { NETPASTE_PASSPHRASE: 'from env' };
+    const env: NodeJS.ProcessEnv = { NETPASTE_PASSPHRASE: 'from env' };
     const result = await resolvePassphrase({ file, env, stdin: notTty(), prompt: new PassThrough(), log: recordingLogger() });
     assert.equal(result, 'from file with spaces  \n');
+    assert.equal(env.NETPASTE_PASSPHRASE, undefined, 'removed for child processes even when unused');
   });
 
   it('uses NETPASTE_PASSPHRASE and removes it from the environment', async () => {

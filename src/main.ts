@@ -6,7 +6,7 @@ import { type FoundServer, advertise, discoverServers } from './discovery.ts';
 import { type Logger, createLogger, sanitizeForTerminal } from './log.ts';
 import { PassphraseError, PromptCancelledError, resolvePassphrase } from './passphrase.ts';
 import { Hub } from './server.ts';
-import { formatAddress } from './session.ts';
+import { formatAddress } from './address.ts';
 import { VERSION } from './version.ts';
 
 const DISCOVERY_TIMEOUT_MS = 3000;
@@ -79,7 +79,10 @@ async function serve(command: Extract<Command, { name: 'serve' }>, log: Logger, 
   }
   const where = formatAddress(address.address === '::' || address.address === '0.0.0.0' ? '*' : address.address, address.port);
   log.info(`netpaste ${VERSION} is listening on ${where}; ${clipboard ? 'clipboard sync is on' : 'relay only (--no-clipboard)'}`);
-  const announcement = command.mdns ? advertise(address.port, localName, log) : null;
+  // bonjour-service announces the addresses of all interfaces, so a hub limited by --host is not announced.
+  const listensEverywhere = command.host === undefined || command.host === '0.0.0.0' || command.host === '::';
+  if (command.mdns && !listensEverywhere) log.info('mDNS announcement is off because --host limits the listen address');
+  const announcement = command.mdns && listensEverywhere ? advertise(address.port, localName, log) : null;
   if (announcement) log.info(`announced on the local network as "${localName}"`);
 
   await waitForSignal();
@@ -95,7 +98,7 @@ async function connect(command: Extract<Command, { name: 'connect' }>, log: Logg
   const clipboard = command.clipboard ? new ClipboardWatcher(await systemClipboard(), { intervalMs: command.options.intervalMs, log }) : null;
   const client = new Client({
     target: command.target,
-    findServer: command.target ? undefined : () => findSingleServer(log),
+    findServer: command.target ? undefined : (signal) => findSingleServer(log, signal),
     passphrase,
     clipboard,
     maxTextBytes: command.options.maxTextBytes,
@@ -129,13 +132,14 @@ async function discover(timeoutMs: number, log: Logger, io: MainIO): Promise<num
   return 0;
 }
 
-async function findSingleServer(log: Logger): Promise<Target> {
+/** Not fatal on purpose: anyone on the network can announce a service, and the client keeps trying. */
+async function findSingleServer(log: Logger, signal: AbortSignal): Promise<Target> {
   log.debug('looking for a netpaste server on the local network');
-  const servers = await discoverServers(DISCOVERY_TIMEOUT_MS);
+  const servers = await discoverServers(DISCOVERY_TIMEOUT_MS, undefined, signal);
   if (servers.length === 0) throw new Error('no netpaste server found on the local network');
   if (servers.length > 1) {
     const list = servers.map((s) => `"${s.name}" at ${formatAddress(s.host, s.port)}`).join(', ');
-    throw new FatalError(`found ${servers.length} servers: ${list}. Choose one: netpaste connect HOST[:PORT]`);
+    throw new Error(`found ${servers.length} servers: ${list}. Choose one: netpaste connect HOST[:PORT]`);
   }
   const [server] = servers as [FoundServer];
   log.info(`found server "${server.name}" at ${formatAddress(server.host, server.port)}`);

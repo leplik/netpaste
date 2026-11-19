@@ -23,13 +23,14 @@ export interface PassphraseSources {
 
 /** Order: --passphrase-file, then NETPASTE_PASSPHRASE, then a hidden prompt on the terminal. */
 export async function resolvePassphrase({ file, env, stdin, prompt, log }: PassphraseSources): Promise<string> {
+  const fromEnv = env[PASSPHRASE_ENV];
+  // Child processes (pbcopy, xsel …) inherit the environment; they must not see the passphrase.
+  delete env[PASSPHRASE_ENV];
   let passphrase: string;
   if (file) {
     passphrase = await readPassphraseFile(file, log);
-  } else if (env[PASSPHRASE_ENV]) {
-    passphrase = env[PASSPHRASE_ENV];
-    // Child processes (pbcopy, xsel …) do not need it.
-    delete env[PASSPHRASE_ENV];
+  } else if (fromEnv) {
+    passphrase = fromEnv;
   } else if (stdin.isTTY) {
     passphrase = await promptHidden('Passphrase: ', stdin, prompt);
   } else {
@@ -103,9 +104,14 @@ export class HiddenLineEditor {
     for (const ch of input) {
       if (this.done || this.cancelled) break;
       if (this.#escape !== null) {
-        this.#escape += ch;
-        if (isCompleteEscape(this.#escape)) this.#escape = null;
-        continue;
+        // ESC followed by Enter, Ctrl+C, Backspace … : the ESC was a stray key press, not a sequence.
+        if (this.#escape === '\u001b' && /\p{Cc}/u.test(ch) && ch !== '\u001b') {
+          this.#escape = null;
+        } else {
+          this.#escape += ch;
+          if (isCompleteEscape(this.#escape)) this.#escape = null;
+          continue;
+        }
       }
       switch (ch) {
         case '\r':
@@ -130,7 +136,8 @@ export class HiddenLineEditor {
           this.#escape = ch;
           break;
         default:
-          if (!/\p{Cc}/u.test(ch)) {
+          // TAB is a valid passphrase character (it is kept in files and in the environment too).
+          if (ch === '\t' || !/\p{Cc}/u.test(ch)) {
             this.#chars.push(ch);
             echo += '*';
           }

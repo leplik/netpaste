@@ -1,3 +1,5 @@
+import { once } from 'node:events';
+import net from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { Timings } from '../src/config.ts';
 import type { KdfParams } from '../src/crypto.ts';
@@ -67,6 +69,20 @@ export function recordingLogger(): RecordingLogger {
     debug: (message) => lines.push({ level: 'debug', message }),
     has: (level, pattern) => lines.some((line) => line.level === level && pattern.test(line.message)),
   };
+}
+
+/** Two connected TCP sockets on the loopback interface. */
+export async function socketPair(host = '127.0.0.1'): Promise<{ client: net.Socket; server: net.Socket }> {
+  const listener = net.createServer();
+  await new Promise<void>((resolve) => listener.listen(0, host, resolve));
+  const { port } = listener.address() as net.AddressInfo;
+  const accepted = once(listener, 'connection');
+  const client = net.connect(port, host);
+  const connected = once(client, 'connect');
+  const [server] = (await accepted) as [net.Socket];
+  await connected;
+  listener.close();
+  return { client, server };
 }
 
 export async function waitFor(condition: () => boolean, what: string, timeoutMs = 4000): Promise<void> {

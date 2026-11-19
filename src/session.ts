@@ -10,6 +10,7 @@
  */
 import { EventEmitter } from 'node:events';
 import type { Socket } from 'node:net';
+import { formatAddress } from './address.ts';
 import { MAX_TEXT_BYTES_CEILING, MIN_TEXT_BYTES } from './config.ts';
 import { type SecureChannel, TAG_BYTES } from './crypto.ts';
 import { FrameType } from './frame.ts';
@@ -40,7 +41,11 @@ interface SessionEvents {
   close: [error: Error | null];
 }
 
-export type SendResult = 'sent' | 'too-large' | 'closed';
+/**
+ * - `not-ready`: the peer has not sent INFO yet, so its size limit is unknown;
+ * - `too-slow`: the peer has not received the earlier data yet (the send queue is full).
+ */
+export type SendResult = 'sent' | 'too-large' | 'too-slow' | 'not-ready' | 'closed';
 
 export class ProtocolError extends Error {
   override name = 'ProtocolError';
@@ -52,6 +57,8 @@ export class PeerTimeoutError extends Error {
 
 /** INFO and other control messages must fit even when the text limit is small. */
 const MIN_BODY_BYTES = 4096;
+/** Room in the send queue above one maximum-size text. Above it, texts are skipped for that peer. */
+const QUEUE_SLACK_BYTES = 1024 * 1024;
 
 export class Session extends EventEmitter<SessionEvents> {
   readonly remoteAddress: string;
@@ -90,18 +97,26 @@ export class Session extends EventEmitter<SessionEvents> {
     this.#idle = setTimeout(() => {
       this.#finish(new PeerTimeoutError(`no data from the peer for ${Math.round(this.#options.idleTimeoutMs / 1000)} s`));
     }, this.#options.idleTimeoutMs);
-    this.#heartbeat = setInterval(() => {
-      if (Date.now() - this.#lastSentAt >= this.#options.heartbeatIntervalMs) this.#send(MessageKind.Ping);
-    }, this.#options.heartbeatIntervalMs);
+    // Any received bytes prove that the peer is alive, also in the middle of a large text on a slow link.
+    this.#socket.on('data', () => this.#idle?.refresh());
+    // Check three times per interval, so a PING goes out 15–20 s after the last frame, not 15–30 s.
+    // performance.now() is monotonic: a clock change does not stop the heartbeats.
+    this.#heartbeat = setInterval(
+      () => {
+        if (performance.now() - this.#lastSentAt >= this.#options.heartbeatIntervalMs) this.#send(MessageKind.Ping);
+      },
+      Math.max(1, Math.floor(this.#options.heartbeatIntervalMs / 3)),
+    );
     void this.#readLoop();
   }
 
-  /** Sends clipboard text. Text larger than our or the peer's limit is not sent. */
+  /** Sends clipboard text, unless it is above our or the peer's limit, or the peer is not ready or too slow. */
   sendClip(text: string): SendResult {
     if (this.#closed) return 'closed';
+    if (!this.peer) return 'not-ready';
     const bytes = Buffer.from(text, 'utf8');
-    const limit = Math.min(this.#options.maxTextBytes, this.peer?.maxTextBytes ?? Number.POSITIVE_INFINITY);
-    if (bytes.length > limit) return 'too-large';
+    if (bytes.length > Math.min(this.#options.maxTextBytes, this.peer.maxTextBytes)) return 'too-large';
+    if (this.#queueFull()) return 'too-slow';
     this.#send(MessageKind.Clip, bytes);
     return 'sent';
   }
@@ -114,7 +129,12 @@ export class Session extends EventEmitter<SessionEvents> {
   #send(kind: number, payload: Buffer = Buffer.alloc(0)): void {
     if (this.#closed || this.#socket.destroyed) return;
     this.#socket.write(this.#channel.seal(Buffer.concat([Buffer.of(kind), payload])));
-    this.#lastSentAt = Date.now();
+    this.#lastSentAt = performance.now();
+  }
+
+  /** A peer that does not read must not make our send queue grow without a limit. */
+  #queueFull(): boolean {
+    return this.#socket.writableLength > this.#options.maxTextBytes + QUEUE_SLACK_BYTES;
   }
 
   async #readLoop(): Promise<void> {
@@ -139,7 +159,7 @@ export class Session extends EventEmitter<SessionEvents> {
         if (payload.length > 0) this.emit('clip', payload.toString('utf8'));
         break;
       case MessageKind.Ping:
-        this.#send(MessageKind.Pong);
+        if (!this.#queueFull()) this.#send(MessageKind.Pong);
         break;
       case MessageKind.Pong:
         break;
@@ -184,14 +204,6 @@ export function parsePeerInfo(payload: Buffer): PeerInfo {
     version: version || '?',
     maxTextBytes: Math.min(Math.max(limit, MIN_TEXT_BYTES), MAX_TEXT_BYTES_CEILING),
   };
-}
-
-/** "192.168.1.5:8134", "[fe80::1]:8134"; IPv4-mapped IPv6 addresses are shown as IPv4. */
-export function formatAddress(address: string | undefined, port: number | undefined): string {
-  if (!address) return 'unknown';
-  const host = address.startsWith('::ffff:') ? address.slice(7) : address;
-  const shown = host.includes(':') ? `[${host}]` : host;
-  return port === undefined ? shown : `${shown}:${port}`;
 }
 
 function asError(value: unknown): Error {

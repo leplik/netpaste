@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
 import net from 'node:net';
 import { describe, it } from 'node:test';
-import { IntegrityError } from '../src/crypto.ts';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { IntegrityError, generateEphemeralKey } from '../src/crypto.ts';
 import { FrameDecoder, FrameType, encodeFrame } from '../src/frame.ts';
 import { FrameReader } from '../src/frame-reader.ts';
 import {
@@ -12,20 +12,8 @@ import {
   clientHandshake,
   serverHandshake,
 } from '../src/handshake.ts';
-import { FAST_KDF } from './helpers.ts';
-
-async function socketPair(): Promise<{ client: net.Socket; server: net.Socket }> {
-  const listener = net.createServer();
-  await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', resolve));
-  const { port } = listener.address() as net.AddressInfo;
-  const accepted = once(listener, 'connection');
-  const client = net.connect(port, '127.0.0.1');
-  const connected = once(client, 'connect');
-  const [server] = (await accepted) as [net.Socket];
-  await connected;
-  listener.close();
-  return { client, server };
-}
+import type { Limiter } from '../src/limiter.ts';
+import { FAST_KDF, socketPair } from './helpers.ts';
 
 function handshakes(pair: { client: net.Socket; server: net.Socket }, clientPassphrase: string, serverPassphrase: string) {
   return Promise.allSettled([
@@ -96,6 +84,31 @@ describe('handshake', () => {
     assert.equal(reply.body.readUInt8(0), HandshakeErrorCode.VersionMismatch);
     await serverDone;
     pair.client.destroy();
+  });
+
+  it('runs scrypt on the server only after the client proof arrives', async () => {
+    const pair = await socketPair();
+    let runs = 0;
+    const limiter = { run: async <T>(task: () => Promise<T>) => (runs++, task()) } as unknown as Limiter;
+    const serverDone = serverHandshake(pair.server, new FrameReader(pair.server, HANDSHAKE_MAX_BODY_BYTES), {
+      passphrase: 'x',
+      kdf: FAST_KDF,
+      kdfLimiter: limiter,
+    }).catch(() => undefined);
+    pair.client.write(encodeFrame(FrameType.Hello, Buffer.concat([Buffer.from('NETPASTE'), Buffer.of(2, 0), generateEphemeralKey().publicKey])));
+    await sleep(200);
+    assert.equal(runs, 0, 'a HELLO without AUTH costs the server nothing');
+    pair.client.destroy();
+    await serverDone;
+  });
+
+  it('does not believe a "wrong passphrase" error that arrives before its own proof', async () => {
+    const pair = await socketPair();
+    const clientDone = clientHandshake(pair.client, new FrameReader(pair.client, HANDSHAKE_MAX_BODY_BYTES), { passphrase: 'x', kdf: FAST_KDF });
+    pair.server.write(encodeFrame(FrameType.Error, Buffer.of(HandshakeErrorCode.AuthFailed)));
+    await assert.rejects(clientDone, (error: unknown) => error instanceof HandshakeError && error.failure === 'protocol');
+    pair.client.destroy();
+    pair.server.destroy();
   });
 
   it('rejects a low-order X25519 key', async () => {

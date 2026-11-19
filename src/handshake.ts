@@ -7,12 +7,14 @@
  *     │   transcript = SHA-256(label | helloC | helloS)    │
  *     │   pk = scrypt(passphrase, SHA-256(label | transcript))
  *     │   keys = HKDF(X25519(e, e') | pk, transcript)      │
- *     │── AUTH   HMAC(clientProofKey, transcript) ────────▶│ wrong → delay, ERROR, close
+ *     │── AUTH   HMAC(clientProofKey, transcript) ────────▶│ wrong → block address, delay, ERROR, close
  *     │◀── AUTH  HMAC(serverProofKey, transcript) ────────│
  *     │════════ Sealed frames, AES-256-GCM ════════════════│
  *
  * - A passive eavesdropper cannot test passphrase guesses: the proofs depend on the X25519 secret.
  * - The server proves nothing before the client does, so a stranger that connects learns nothing.
+ * - The server runs scrypt only after it has the client proof, so each scrypt run costs the
+ *   other side a passphrase attempt (and a wrong attempt blocks its address).
  * - Both sides add a fresh key to the scrypt salt, so a fake server cannot reuse precomputed guesses.
  * - An active man-in-the-middle (or a fake server) can still guess the passphrase offline from the
  *   client proof, one scrypt run per guess. A long passphrase makes this impractical.
@@ -75,6 +77,10 @@ export interface HandshakeOptions {
   kdfLimiter?: Limiter;
   /** Server: wait this long before it reports a wrong passphrase. */
   authFailureDelayMs?: number;
+  /** Server: asked right before scrypt; false drops the connection (for example, its address was blocked meanwhile). */
+  admit?: () => boolean;
+  /** Server: called at once when the client proof is wrong, before the delay. */
+  onWrongPassphrase?: () => void;
 }
 
 export async function clientHandshake(socket: Duplex, reader: FrameReader, options: HandshakeOptions): Promise<SecureChannel> {
@@ -82,7 +88,7 @@ export async function clientHandshake(socket: Duplex, reader: FrameReader, optio
   const helloClient = encodeHello(Role.Client, ephemeral.publicKey);
   socket.write(encodeFrame(FrameType.Hello, helloClient));
 
-  const helloServer = expectFrame(await readHandshakeFrame(reader), FrameType.Hello).body;
+  const helloServer = expectFrame(await readHandshakeFrame(reader, false), FrameType.Hello).body;
   const peerKey = parseHello(helloServer, Role.Server);
   const transcript = transcriptHash(helloClient, helloServer);
   const shared = x25519(ephemeral.privateKey, peerKey);
@@ -91,7 +97,7 @@ export async function clientHandshake(socket: Duplex, reader: FrameReader, optio
 
   socket.write(encodeFrame(FrameType.Auth, proof(secrets.clientProofKey, 'client', transcript)));
 
-  const serverProof = expectFrame(await readHandshakeFrame(reader), FrameType.Auth).body;
+  const serverProof = expectFrame(await readHandshakeFrame(reader, true), FrameType.Auth).body;
   if (!constantTimeEqual(serverProof, proof(secrets.serverProofKey, 'server', transcript))) {
     throw new HandshakeError('peer-unverified', 'the server could not prove that it knows the passphrase');
   }
@@ -99,7 +105,7 @@ export async function clientHandshake(socket: Duplex, reader: FrameReader, optio
 }
 
 export async function serverHandshake(socket: Duplex, reader: FrameReader, options: HandshakeOptions): Promise<SecureChannel> {
-  const helloClient = expectFrame(await readHandshakeFrame(reader), FrameType.Hello).body;
+  const helloClient = expectFrame(await readHandshakeFrame(reader, false), FrameType.Hello).body;
   let peerKey: Buffer;
   try {
     peerKey = parseHello(helloClient, Role.Client);
@@ -117,15 +123,21 @@ export async function serverHandshake(socket: Duplex, reader: FrameReader, optio
 
   const transcript = transcriptHash(helloClient, helloServer);
   const shared = x25519(ephemeral.privateKey, peerKey);
+
+  // Wait for the client proof before the expensive scrypt run: then every scrypt run on the hub
+  // belongs to a passphrase attempt, and a wrong attempt blocks the address.
+  const clientProof = expectFrame(await readHandshakeFrame(reader, false), FrameType.Auth).body;
   const derive = async () => {
-    if (socket.destroyed) throw new ConnectionClosedError('the connection was closed');
+    if (socket.destroyed || options.admit?.() === false) throw new ConnectionClosedError('the connection was dropped');
     return derivePassphraseKey(options.passphrase, kdfSalt(transcript), options.kdf);
   };
   const passphraseKey = await (options.kdfLimiter ? options.kdfLimiter.run(derive) : derive());
+  // The connection can be dropped during scrypt (another wrong guess from the same address): no answer then.
+  if (socket.destroyed) throw new ConnectionClosedError('the connection was dropped');
   const secrets = deriveSessionSecrets(shared, passphraseKey, transcript);
 
-  const clientProof = expectFrame(await readHandshakeFrame(reader), FrameType.Auth).body;
   if (!constantTimeEqual(clientProof, proof(secrets.clientProofKey, 'client', transcript))) {
+    options.onWrongPassphrase?.();
     await delay(options.authFailureDelayMs ?? 0);
     if (!socket.destroyed) socket.end(encodeFrame(FrameType.Error, Buffer.of(HandshakeErrorCode.AuthFailed)));
     throw new HandshakeError('peer-unverified', 'the client sent a wrong passphrase');
@@ -152,7 +164,8 @@ function parseHello(body: Buffer, expectedRole: RoleValue): Buffer {
   return body.subarray(MAGIC.length + 2);
 }
 
-async function readHandshakeFrame(reader: FrameReader): Promise<Frame> {
+/** `proofSent`: whether we already sent our AUTH; a "wrong passphrase" error before that is not believable. */
+async function readHandshakeFrame(reader: FrameReader, proofSent: boolean): Promise<Frame> {
   let frame: Frame;
   try {
     frame = await reader.next();
@@ -162,7 +175,7 @@ async function readHandshakeFrame(reader: FrameReader): Promise<Frame> {
     }
     throw error;
   }
-  if (frame.type === FrameType.Error) throw remoteError(frame.body);
+  if (frame.type === FrameType.Error) throw remoteError(frame.body, proofSent);
   return frame;
 }
 
@@ -171,10 +184,14 @@ function expectFrame(frame: Frame, type: number): Frame {
   return frame;
 }
 
-/** Maps the peer's error code to our own text; the peer's bytes never reach the terminal. */
-function remoteError(body: Buffer): HandshakeError {
+/**
+ * Maps the peer's error code to our own text; the peer's bytes never reach the terminal.
+ * ERROR frames are not authenticated, so callers must not trust them too much.
+ */
+function remoteError(body: Buffer, proofSent: boolean): HandshakeError {
   switch (body.length > 0 ? body.readUInt8(0) : 0) {
     case HandshakeErrorCode.AuthFailed:
+      if (!proofSent) return new HandshakeError('protocol', 'the peer reported a wrong passphrase before the passphrase check');
       return new HandshakeError('rejected', 'the server rejected the passphrase');
     case HandshakeErrorCode.VersionMismatch:
       return new HandshakeError('version-mismatch', 'the server speaks a different protocol version; update netpaste on both machines');

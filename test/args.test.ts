@@ -75,6 +75,13 @@ describe('parseTarget', () => {
     assert.deepEqual(parseTarget('[fe80::1]'), { host: 'fe80::1', port: 8134 });
     assert.deepEqual(parseTarget('fe80::1'), { host: 'fe80::1', port: 8134 });
     assert.deepEqual(parseTarget('box', 9100), { host: 'box', port: 9100 });
+    assert.deepEqual(parseTarget('my_box.local.'), { host: 'my_box.local.', port: 8134 });
+  });
+
+  it('rejects things that are not host names instead of retrying DNS forever', () => {
+    for (const value of ['box:9000:1', 'http://box:8134', 'bad host', '-box', 'a..b', '[nonsense]:8134']) {
+      assert.throws(() => parseTarget(value), UsageError, value);
+    }
   });
 });
 
@@ -87,6 +94,7 @@ describe('parseSize', () => {
   });
 
   it('rejects junk and out-of-range values', () => {
-    for (const value of ['abc', '10tb', '1b', '1000mb', '']) assert.throws(() => parseSize(value), UsageError, value);
+    for (const value of ['abc', '10tb', '1b', '1000mb', '100mb', '']) assert.throws(() => parseSize(value), UsageError, value);
+    assert.equal(parseSize('64mb'), 64 * 1024 * 1024);
   });
 });
