@@ -15,8 +15,15 @@ A rewrite. The protocol is not compatible with 1.x: update all machines.
 - **Strong key derivation:** scrypt (128 MiB) once per connection.
   1.x ran PBKDF2 with 10,000 iterations for every message, on the main thread.
 - **Forward secrecy and replay protection:** ephemeral X25519 keys and per-direction message counters.
-- **Online guessing is slowed down:** after a wrong passphrase, the hub blocks the IP address
-  (1 s, then doubling up to 60 s).
+- **Strangers cannot make the hub work for free or lock out real clients:**
+  - the hub runs scrypt only after it receives a passphrase proof;
+  - connections without the passphrase are limited to 4 per address and 32 in total;
+  - unread input is limited by TCP flow control, so nobody can fill the hub's memory.
+- **Online guessing is slowed down:** after a wrong passphrase, the hub blocks the address (IPv6: the /64):
+  1 s, then doubling up to 60 s. Parallel connections from that address are closed, so one address can
+  test at most 2 passphrases per block period.
+- Handshake ERROR frames are not authenticated, so a "wrong passphrase" reply stops the client only when
+  you gave the hub address, and only after the client sent its proof.
 - Peer-supplied names are cleaned of control characters before they are printed.
 
 ### Fixed
@@ -57,7 +64,7 @@ A rewrite. The protocol is not compatible with 1.x: update all machines.
 - mDNS discovery: `netpaste connect` without an address finds the hub.
 - Passphrase from `--passphrase-file` or `NETPASTE_PASSPHRASE`, for autostart. Templates for launchd and systemd.
 - Heartbeats, idle timeout, TCP keepalive, reconnect with exponential backoff and jitter.
-- `--max-size` (default 10 MB), `--interval`, `--host`, `--no-mdns`, `--verbose`.
+- `--max-size` (default 10 MB, up to 64 MB), `--interval`, `--host`, `--no-mdns`, `--verbose`.
 - The clipboard is read only while a peer is connected.
 - Clear messages for a wrong passphrase, an old protocol version, a busy port, and a missing terminal.
 

@@ -68,12 +68,12 @@ Copies are sent only while a connection is open; a copy made while disconnected 
 | Option | Default | Meaning |
 |---|---|---|
 | `-p, --port N` | 8134 | TCP port. |
-| `--host ADDR` | all interfaces | `serve`: listen only on this address. |
+| `--host ADDR` | all interfaces | `serve`: listen only on this address (the hub is then not announced with mDNS). |
 | `--no-clipboard` | | Do not use the local clipboard. With `serve`: only relay between clients. |
 | `--no-mdns` | | `serve`: do not announce the hub on the network. |
 | `--passphrase-file F` | | Read the passphrase from file F. |
 | `--interval MS` | 1000 | How often to check the clipboard. |
-| `--max-size SIZE` | 10mb | Largest text to send or accept, for example `512kb`. |
+| `--max-size SIZE` | 10mb | Largest text to send or accept, from `1kb` to `64mb`. |
 | `--timeout SEC` | 3 | `discover`: how long to search. |
 | `--verbose` | | Show debug messages. |
 
@@ -148,8 +148,9 @@ The full design is in [docs/PROTOCOL.md](docs/PROTOCOL.md). In short:
 - eavesdroppers: they cannot read the text, and they cannot test passphrase guesses;
 - changed, replayed or reordered messages: they fail authentication and close the connection;
 - strangers who connect to the hub: they receive nothing until they prove the passphrase.
-  After a wrong passphrase, the hub blocks that address for 1 s, then 2 s, 4 s … up to 60 s;
-- malformed input: it closes that one connection, never the program.
+  The hub limits their connections (4 per address, 32 in total) and runs scrypt only for a real passphrase attempt.
+  After a wrong passphrase, the hub blocks that address (IPv6: the /64) for 1 s, then 2 s, 4 s … up to 60 s;
+- malformed input and floods: they close that one connection, never the program.
 
 **Does not protect against:**
 
@@ -160,6 +161,9 @@ The full design is in [docs/PROTOCOL.md](docs/PROTOCOL.md). In short:
 - machines that know the passphrase: they can read your copies and write to your clipboard;
 - password managers: netpaste syncs a copied password like any other text, and the other
   machine keeps it after the password manager clears its own clipboard.
+
+**Known limitation:** if you copy on two machines within about a second, the copies can cross:
+each machine keeps the other's text until the next copy. See [docs/PROTOCOL.md](docs/PROTOCOL.md#known-limitations).
 
 ## Upgrading from 1.x
 

@@ -10,9 +10,10 @@ client                                                     hub
   │── TCP connect ─────────────────────────────────────────▶│
   │── HELLO  "NETPASTE" | 2 | role=0 | X25519 key eC ───────▶│
   │◀── HELLO "NETPASTE" | 2 | role=1 | X25519 key eS ────────│
-  │   both: transcript, scrypt, X25519, HKDF (see below)     │
-  │── AUTH   client proof ─────────────────────────────────▶│  wrong → wait 1 s, ERROR, close,
-  │◀── AUTH  hub proof ──────────────────────────────────────│          block the IP address
+  │   client: transcript, scrypt, X25519, HKDF (see below)   │
+  │── AUTH   client proof ─────────────────────────────────▶│  hub: scrypt only now, then check
+  │◀── AUTH  hub proof ──────────────────────────────────────│  wrong → block the address,
+  │                                                           │          wait 1 s, ERROR, close
   │══ SEALED INFO ═══════════════════════════════════════════│  both directions
   │══ SEALED CLIP / PING / PONG ══════════════════════════════│
 ```
@@ -40,6 +41,10 @@ The receiver checks the length before it buffers the body:
 A frame above the limit, an unknown frame type during the handshake, or a failed decryption
 closes the connection.
 
+The receiver also stops reading from the socket when more than one maximum-size frame + 64 KiB
+waits unread, for example while the hub runs scrypt. TCP flow control then stops the sender,
+so a peer cannot make the receiver buffer more than that.
+
 ## Handshake
 
 `HELLO` body: `"NETPASTE"` (8 bytes) | protocol version (u8, = 2) | role (u8: 0 client, 1 hub) | ephemeral X25519 public key (32 bytes).
@@ -56,14 +61,32 @@ keys       = HKDF-SHA256(ikm = dh | pk, salt = transcript, info = "netpaste/2 se
 ```
 
 - The client sends `AUTH = HMAC-SHA256(clientProofKey, "netpaste/2 client proof" | transcript)`.
+- The hub waits for this AUTH **before** it runs scrypt. So every scrypt run on the hub belongs to a
+  passphrase attempt, and a stranger who sends only HELLO costs the hub nothing.
 - The hub checks the client proof with a constant-time comparison.
-  - **Wrong proof:** the hub waits 1 s, sends `ERROR 1`, and closes the connection. It also blocks the IP address for 1 s; every further failure doubles the block, up to 60 s.
+  - **Wrong proof:** the hub blocks the address at once (see below), waits 1 s, sends `ERROR 1`, and closes the connection.
+    It also closes the other unauthenticated connections from that address.
   - **Correct proof:** the hub sends `AUTH = HMAC-SHA256(hubProofKey, "netpaste/2 server proof" | transcript)`.
 - The client checks the hub proof. If it is wrong, the client closes the connection and tries again later.
 
+ERROR frames are not authenticated. The client believes `ERROR 1` (wrong passphrase) only after it sent its AUTH.
+It stops with an error only when the user gave the hub address; for a hub found with mDNS it keeps trying.
+
 The passphrase is normalized to Unicode NFC, so the same passphrase typed on macOS and on Linux gives the same key.
-The hub runs at most 2 scrypt computations at the same time (each needs 128 MiB).
 The whole handshake must finish within 10 s.
+
+Limits on the hub, so that strangers cannot block real clients:
+
+| Limit | Value |
+|---|---|
+| Connections without the passphrase, from one address (IPv6: one /64) | 4 |
+| Connections without the passphrase, in total | 32 |
+| Authenticated peers | 32 |
+| Parallel scrypt runs (128 MiB each) | 2 |
+| Block after a wrong passphrase (per address, IPv6 per /64) | 1 s, doubling with every failure, up to 60 s |
+
+A blocked address is refused at once, also by connections that were already open.
+So one address can test at most 2 passphrases (the parallel scrypt runs) per block period.
 
 ## Messages
 
@@ -83,13 +106,18 @@ The plaintext is `kind (u8) | payload`:
 | 4 | INFO | JSON `{"name": string, "version": string, "maxTextBytes": number}`, sent first by both sides |
 
 A receiver ignores unknown kinds, so later versions can add messages.
-The sender never sends text above `min(own limit, peer limit)`.
-The receiver closes the connection when the text is above its own limit.
+The receiver closes the connection when the text is above its own limit (`--max-size`, at most 64 MiB).
+The sender does not send text:
+
+- above `min(own limit, peer limit)`;
+- to a peer that has not sent INFO yet (its limit is unknown);
+- to a peer whose send queue already holds more than one maximum-size text + 1 MiB (the peer does not read).
 
 Liveness:
 
-- A side sends PING when it sent nothing for 15 s.
-- A side closes the connection when it received nothing for 45 s.
+- A side sends PING when it sent nothing for 15 s (it checks every 5 s, on a monotonic clock).
+- A side closes the connection when it received no bytes for 45 s. Every received chunk counts,
+  so a large text on a slow link does not trigger the timeout.
 - TCP keepalive is on as well.
 
 ## Hub behaviour
@@ -111,21 +139,32 @@ computer, for example to `<name>-2.local`. Clients connect to the address the an
 `netpaste connect` without HOST searches for 3 s:
 
 - exactly one hub found: the client connects to it;
-- several hubs found: the client stops and lists them;
+- several hubs found: the client lists them and tries again with backoff (give HOST to choose one);
 - no hub found: the client tries again with backoff.
+
+`netpaste serve --host ADDR` with a specific address does not announce the hub: bonjour-service
+announces the addresses of all interfaces, and clients would connect to an address the hub does not listen on.
 
 ## Security properties
 
 | Threat | Result |
 |---|---|
 | Passive eavesdropper | Cannot read messages. Cannot test passphrase guesses: the proofs depend on the X25519 secret. |
-| Stranger connects to the hub | Receives only the hub's HELLO: one ephemeral key, nothing that depends on the passphrase. Gets one online guess per connection, then the IP address is blocked. |
+| Stranger connects to the hub | Receives only the hub's HELLO: one ephemeral key, nothing that depends on the passphrase. Costs the hub a scrypt run only together with a passphrase attempt. At most 2 guesses per block period from one address (see the limits above). |
 | Changed, replayed, reordered or reflected message | GCM authentication fails, the connection closes. Keys differ per direction and per connection. |
 | Recorded traffic, passphrase leaks later | Old sessions stay secret: the keys also depend on ephemeral X25519 keys (forward secrecy). |
 | Active attacker poses as the hub (mDNS spoofing, MITM) | Can try passphrase guesses **offline** against the client proof, one scrypt run per guess. Both sides contribute to the salt, so precomputed tables do not help. Only a long passphrase protects here; a PAKE (for example CPace) would remove this attack. |
-| Malformed input | Closes that connection. Frame sizes are checked before buffering. |
+| Malformed input or a flood | Closes that connection. Frame sizes are checked before buffering; unread input is limited by TCP flow control. |
 
 Not hidden: the size of each message, and the time of each copy.
+
+## Known limitations
+
+- **Crossing copies.** If two machines copy different texts within about one poll interval (1 s),
+  the hub forwards each text to the other machine. Each machine then keeps the other's text, and the hub
+  keeps the one it received last, until the next copy. A fix (the hub orders all copies and echoes them to
+  the sender) would make the sender's clipboard flicker, so it is not done.
+- **Copies while disconnected** are not sent later: the clipboard can change on other machines meanwhile.
 
 ## Changes from version 1
 
